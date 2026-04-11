@@ -1,0 +1,29 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+.venv/
+.env
+
+# Caches and logs
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+logs/
+
+# Data and run outputs
+data/
+artifacts/
+reports/
+checkpoints/
+
+# Hugging Face caches
+.cache/
+hf_cache/
+
+# IDEs and OS
+.idea/
+.vscode/
+.DS_Store
