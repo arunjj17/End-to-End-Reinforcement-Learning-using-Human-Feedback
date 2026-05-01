@@ -2,6 +2,8 @@
 
 AgentRLHF is a CPU-friendly synthetic RLHF pipeline for studying how a tool-using AI agent learns multi-step behavior from demonstrations, trajectory preferences, and reinforcement learning with a KL penalty.
 
+Many agents today have access to tools and memory, but they still struggle with deciding when and how to use them. AgentRLHF targets that gap by training the agent's decision process over full trajectories, including tool use, memory use, clarification, verification, safety handling, and cost awareness.
+
 ## Open-Source / Local-Only Statement
 
 This project does not use OpenAI, Anthropic, Gemini, Cohere, Perplexity, or any other closed-source hosted LLM API. The default mode runs entirely with NumPy, deterministic synthetic tools, synthetic memory, and template outputs.
