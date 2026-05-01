@@ -191,6 +191,8 @@ uv run rlhf-pipeline benchmark-models \
 
 Benchmark mode uses only the local Ollama HTTP API. You can use any open-source model that is installed in Ollama; examples include `llama3.2:1b`, and `gemma3:1b`. If Ollama is not running or a model is not installed, the command prints a warning and skips that model. The normal pipeline and tests do not require Ollama.
 
+GPU acceleration is optional for AgentRLHF itself. The default synthetic pipeline is lightweight and CPU-friendly. For higher-parameter open-source Ollama models, a GPU or Apple Metal acceleration can make inference much faster and may be needed for practical latency or memory headroom. If local benchmark requests time out, try fewer tasks, a longer `--ollama-timeout`, or a smaller model before assuming new hardware is required.
+
 ## Optional Ollama Usage
 
 Start Ollama through the macOS app, or from a shell if needed:
@@ -212,6 +214,8 @@ Example local Ollama model names include:
 - `gemma3:27b`
 
 You can use any open-source model that can run locally through Ollama.
+
+Larger parameter models may need more RAM/VRAM and benefit strongly from GPU acceleration. Smaller models are usually better for quick CPU-friendly benchmarks.
 
 Run the demo with local Ollama final-answer wording:
 
