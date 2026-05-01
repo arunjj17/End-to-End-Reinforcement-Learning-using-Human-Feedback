@@ -13,6 +13,7 @@ from rlhf_pipeline.agent_env import (
     run_tool,
     trajectory_diagnostics,
 )
+from rlhf_pipeline.benchmark import parse_action_response
 from rlhf_pipeline.cli import main as cli_main
 from rlhf_pipeline.ollama_client import OllamaClient
 from rlhf_pipeline.tool_registry import LOCAL_TOOL_REGISTRY
@@ -234,6 +235,45 @@ class AgentPipelineTest(unittest.TestCase):
         self.assertIn("AgentRLHF", text)
         self.assertIn("avg tool cost", text)
         self.assertIn("style match", text)
+
+    def test_benchmark_action_parser_accepts_json_and_text(self) -> None:
+        json_actions, json_ok = parse_action_response(
+            '{"actions": ["memory_lookup", "answer_directly"]}',
+            max_steps=4,
+        )
+        text_actions, text_ok = parse_action_response(
+            "I would use search_tool then verify_answer and answer_directly.",
+            max_steps=4,
+        )
+        fallback_actions, fallback_ok = parse_action_response("no valid action", max_steps=4)
+
+        self.assertEqual(json_actions, ("memory_lookup", "answer_directly"))
+        self.assertTrue(json_ok)
+        self.assertEqual(text_actions, ("search_tool", "verify_answer", "answer_directly"))
+        self.assertTrue(text_ok)
+        self.assertEqual(fallback_actions, ("answer_directly",))
+        self.assertFalse(fallback_ok)
+
+    def test_benchmark_cli_fails_gracefully_without_ollama(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            cli_main(
+                [
+                    "benchmark-models",
+                    "--models",
+                    "missing-local-model",
+                    "--num-tasks",
+                    "2",
+                    "--ollama-base-url",
+                    "http://127.0.0.1:9",
+                    "--ollama-timeout",
+                    "0.01",
+                ]
+            )
+
+        text = output.getvalue()
+        self.assertIn("Open-Source Local LLM Agent Benchmark", text)
+        self.assertIn("No models were benchmarked", text)
 
 
 if __name__ == "__main__":

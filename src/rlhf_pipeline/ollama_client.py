@@ -101,29 +101,47 @@ class OllamaClient:
                 "Answer concisely.",
             ]
         )
+        answer = self.generate_text(prompt, temperature=0.2, check_available=False)
+        if answer.used_ollama:
+            return answer
+        return OllamaAnswer(
+            text=fallback,
+            used_ollama=False,
+            warning=answer.warning,
+        )
+
+    def generate_text(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        check_available: bool = True,
+    ) -> OllamaAnswer:
+        if check_available:
+            warning = self.availability_warning()
+            if warning is not None:
+                return OllamaAnswer(text="", used_ollama=False, warning=warning)
+
         payload: dict[str, object] = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
-            "options": {"temperature": 0.2},
+            "options": {"temperature": temperature},
         }
         try:
             data = self._request_json("/api/generate", payload)
         except (TimeoutError, OSError, urllib.error.URLError) as exc:
             return OllamaAnswer(
-                text=fallback,
+                text="",
                 used_ollama=False,
-                warning=(
-                    "Ollama generation failed; falling back to synthetic/template answers "
-                    f"({exc})."
-                ),
+                warning=f"Ollama generation failed for model '{self.model}' ({exc}).",
             )
 
         text = str(data.get("response", "")).strip()
         if not text:
             return OllamaAnswer(
-                text=fallback,
+                text="",
                 used_ollama=False,
-                warning="Ollama returned an empty response; falling back to synthetic/template answers.",
+                warning=f"Ollama model '{self.model}' returned an empty response.",
             )
         return OllamaAnswer(text=text, used_ollama=True)

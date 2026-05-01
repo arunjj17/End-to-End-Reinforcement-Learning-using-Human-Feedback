@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import Iterable
 
 import numpy as np
 
 from .agent_env import ACTIONS, generate_synthetic_tasks, visible_memory_entries
+from .benchmark import ModelBenchmarkResult, benchmark_ollama_models
 from .ollama_client import OllamaClient
 from .train_reward import train_agent_reward_model
 from .train_rl import AgentEvaluation, evaluate_agent_policy, rollout_policy, run_agent_policy_gradient
@@ -54,9 +56,79 @@ def _format_memory(memory: dict[str, str]) -> str:
     return "; ".join(f"{key}={value}" for key, value in memory.items())
 
 
+def _format_benchmark_table(results: list[ModelBenchmarkResult]) -> str:
+    lines = [
+        "model                 tasks reward  tool  memory style safety len  cost latency unnec parse",
+        "--------------------- ----- ------- ----- ------ ----- ------ ---- ---- ------- ----- -----",
+    ]
+    for result in results:
+        if not result.available:
+            lines.append(f"{result.model[:21]:21} {'skip':>5} unavailable")
+            continue
+        lines.append(
+            f"{result.model[:21]:21} "
+            f"{result.num_tasks:5d} "
+            f"{result.true_reward:7.3f} "
+            f"{result.tool_accuracy:5.3f} "
+            f"{result.memory_accuracy:6.3f} "
+            f"{result.style_match:5.3f} "
+            f"{result.safety_accuracy:6.3f} "
+            f"{result.avg_trajectory_length:4.2f} "
+            f"{result.avg_tool_cost:4.2f} "
+            f"{result.avg_tool_latency:7.2f} "
+            f"{result.unnecessary_tool_calls:5.2f} "
+            f"{result.parse_success_rate:5.3f}"
+        )
+    return "\n".join(lines)
+
+
+def build_benchmark_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="rlhf-pipeline benchmark-models",
+        description="Benchmark local open-source Ollama models on synthetic agentic tasks.",
+    )
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        required=True,
+        help="Local Ollama model names to benchmark, for example qwen2.5:3b phi3:mini.",
+    )
+    parser.add_argument("--num-tasks", type=int, default=50, help="Number of synthetic tasks.")
+    parser.add_argument("--seed", type=int, default=17, help="Synthetic task seed.")
+    parser.add_argument("--max-steps", type=int, default=4, help="Maximum actions per model trajectory.")
+    parser.add_argument(
+        "--ollama-base-url",
+        type=str,
+        default="http://localhost:11434",
+        help="Local Ollama HTTP API base URL.",
+    )
+    parser.add_argument(
+        "--ollama-timeout",
+        type=float,
+        default=12.0,
+        help="Per-request Ollama timeout in seconds.",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Ollama sampling temperature for action selection.",
+    )
+    parser.add_argument(
+        "--example-count",
+        type=int,
+        default=2,
+        help="Examples to print per available model.",
+    )
+    return parser
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run AgentRLHF with synthetic tool-using agent trajectories.",
+        description=(
+            "Run AgentRLHF with synthetic tool-using agent trajectories. "
+            "Use `rlhf-pipeline benchmark-models --models ...` for local Ollama benchmarks."
+        ),
     )
     parser.add_argument("--seed", type=int, default=17, help="Random seed.")
     parser.add_argument("--num-tasks", type=int, default=42, help="Number of synthetic user tasks.")
@@ -144,9 +216,65 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> None:
-    parser = build_parser()
+def run_benchmark_command(argv: list[str]) -> None:
+    parser = build_benchmark_parser()
     args = parser.parse_args(argv)
+    results = benchmark_ollama_models(
+        args.models,
+        num_tasks=args.num_tasks,
+        seed=args.seed,
+        max_steps=args.max_steps,
+        base_url=args.ollama_base_url,
+        timeout=args.ollama_timeout,
+        temperature=args.temperature,
+        example_count=max(0, args.example_count),
+    )
+
+    print("=== Open-Source Local LLM Agent Benchmark ===")
+    print("Backend: local Ollama only")
+    print(f"Tasks: {args.num_tasks}, max_steps={args.max_steps}, seed={args.seed}")
+    print()
+    print(_format_benchmark_table(results))
+
+    warnings = [result for result in results if result.warning]
+    if warnings:
+        print()
+        print("Warnings:")
+        for result in warnings:
+            print(f"- {result.model}: {result.warning}")
+
+    available_results = [result for result in results if result.available]
+    if not available_results:
+        print()
+        print("No models were benchmarked. Start Ollama and pull the requested local models first.")
+        return
+
+    print()
+    print("Examples:")
+    for result in available_results:
+        print(f"{result.model}:")
+        for example in result.examples:
+            print(f"  prompt: {example.task.prompt}")
+            print(f"  task type: {example.task.task_type}")
+            print(f"  memory: {_format_memory(visible_memory_entries(example.task))}")
+            print(f"  actions: {_format_actions(example.actions)}")
+            print(
+                f"  reward/tool cost/latency: "
+                f"{example.trajectory.true_reward:.3f}/"
+                f"{example.trajectory.total_tool_cost:.3f}/"
+                f"{example.trajectory.total_tool_latency:.3f}"
+            )
+            print(f"  parse ok: {example.parse_ok}")
+
+
+def main(argv: list[str] | None = None) -> None:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if raw_args and raw_args[0] == "benchmark-models":
+        run_benchmark_command(raw_args[1:])
+        return
+
+    parser = build_parser()
+    args = parser.parse_args(raw_args)
 
     rng = np.random.default_rng(args.seed)
     tasks = generate_synthetic_tasks(args.num_tasks, rng)

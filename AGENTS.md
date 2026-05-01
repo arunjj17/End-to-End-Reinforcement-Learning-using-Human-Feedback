@@ -40,3 +40,8 @@ The registry should power:
 
 Do not add external network tools or closed-source APIs.
 
+## Local Ollama model benchmark
+
+Benchmark mode should compare only local open-source Ollama models on synthetic agentic tasks. It should score model-selected action trajectories with the local synthetic environment and fail gracefully when Ollama is unavailable or a requested model is missing.
+
+The benchmark must not add hosted API providers, API keys, or internet-dependent inference.
