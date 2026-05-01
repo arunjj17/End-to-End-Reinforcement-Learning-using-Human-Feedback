@@ -5,9 +5,11 @@ from typing import Iterable
 
 import numpy as np
 
-from . import data, rl
-from .policy import Policy
-from .reward_model import RewardModel
+from .agent_env import ACTIONS, generate_synthetic_tasks, visible_memory_entries
+from .ollama_client import OllamaClient
+from .train_reward import train_agent_reward_model
+from .train_rl import AgentEvaluation, evaluate_agent_policy, rollout_policy, run_agent_policy_gradient
+from .train_sft import train_agent_sft_policy
 
 
 def _format_history_tail(history: Iterable[dict[str, float]], tail: int) -> str:
@@ -24,126 +26,120 @@ def _format_history_tail(history: Iterable[dict[str, float]], tail: int) -> str:
     return "\n".join(formatted_lines)
 
 
+def _format_eval(title: str, result: AgentEvaluation) -> str:
+    return "\n".join(
+        [
+            f"{title}:",
+            f"- true reward: {result.true_reward:.4f}",
+            f"- predicted reward: {result.predicted_reward:.4f}",
+            f"- tool accuracy: {result.tool_accuracy:.3f}",
+            f"- memory accuracy: {result.memory_usage_accuracy:.3f}",
+            f"- style match: {result.style_match_score:.3f}",
+            f"- safety accuracy: {result.safety_accuracy:.3f}",
+            f"- avg trajectory length: {result.avg_trajectory_length:.2f}",
+            f"- avg tool cost: {result.avg_tool_cost:.3f}",
+            f"- avg tool latency: {result.avg_tool_latency:.3f}",
+            f"- unnecessary tool calls: {result.unnecessary_tool_calls:.3f}",
+        ]
+    )
+
+
+def _format_actions(actions: tuple[str, ...]) -> str:
+    return " -> ".join(actions)
+
+
+def _format_memory(memory: dict[str, str]) -> str:
+    if not memory:
+        return "none"
+    return "; ".join(f"{key}={value}" for key, value in memory.items())
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run an end-to-end synthetic RLHF pipeline.",
+        description="Run AgentRLHF with synthetic tool-using agent trajectories.",
     )
     parser.add_argument("--seed", type=int, default=17, help="Random seed.")
-    parser.add_argument("--prompt-dim", type=int, default=6, help="Dimensionality of prompt features.")
-    parser.add_argument("--response-dim", type=int, default=6, help="Dimensionality of response features.")
-    parser.add_argument("--num-prompts", type=int, default=8, help="Number of unique prompts.")
+    parser.add_argument("--num-tasks", type=int, default=42, help="Number of synthetic user tasks.")
+    parser.add_argument("--max-steps", type=int, default=4, help="Maximum actions per trajectory.")
 
     parser.add_argument(
-        "--samples-per-prompt",
+        "--sft-demos-per-task",
         type=int,
-        default=4,
-        help="Number of supervised demonstrations per prompt.",
+        default=5,
+        help="Noisy supervised demonstrations per task.",
     )
     parser.add_argument(
-        "--demonstration-noise",
+        "--sft-noise-rate",
         type=float,
-        default=0.3,
-        help="Noise scale applied to supervised demonstrations.",
+        default=0.34,
+        help="Probability of corrupting an otherwise good SFT demonstration.",
     )
+    parser.add_argument("--sft-epochs", type=int, default=90, help="SFT training epochs.")
+    parser.add_argument("--sft-lr", type=float, default=0.22, help="SFT learning rate.")
+    parser.add_argument("--sft-batch-size", type=int, default=48, help="SFT batch size.")
+
     parser.add_argument(
-        "--sft-epochs",
-        type=int,
-        default=120,
-        help="Supervised fine-tuning epochs.",
-    )
-    parser.add_argument(
-        "--sft-lr",
-        type=float,
-        default=0.05,
-        help="Learning rate for supervised fine-tuning.",
-    )
-    parser.add_argument(
-        "--sft-batch-size",
+        "--pairs-per-task",
         type=int,
         default=16,
-        help="Batch size for supervised fine-tuning.",
+        help="Trajectory preference pairs per task.",
     )
+    parser.add_argument("--reward-epochs", type=int, default=120, help="Reward model epochs.")
+    parser.add_argument("--reward-lr", type=float, default=0.18, help="Reward model learning rate.")
+    parser.add_argument("--reward-batch-size", type=int, default=96, help="Reward batch size.")
 
-    parser.add_argument(
-        "--pairs-per-prompt",
-        type=int,
-        default=12,
-        help="Preference pairs per prompt.",
-    )
-    parser.add_argument(
-        "--preference-weak-noise",
-        type=float,
-        default=0.35,
-        help="Noise applied to preferred responses.",
-    )
-    parser.add_argument(
-        "--preference-strong-noise",
-        type=float,
-        default=0.9,
-        help="Noise applied to less preferred responses.",
-    )
-    parser.add_argument(
-        "--reward-epochs",
-        type=int,
-        default=150,
-        help="Reward model training epochs.",
-    )
-    parser.add_argument(
-        "--reward-lr",
-        type=float,
-        default=0.1,
-        help="Reward model learning rate.",
-    )
-    parser.add_argument(
-        "--reward-batch-size",
-        type=int,
-        default=64,
-        help="Reward model batch size.",
-    )
-
-    parser.add_argument(
-        "--rl-episodes",
-        type=int,
-        default=160,
-        help="Number of RL fine-tuning episodes.",
-    )
-    parser.add_argument(
-        "--rl-batch-size",
-        type=int,
-        default=64,
-        help="Batch size per RL episode.",
-    )
-    parser.add_argument(
-        "--rl-lr",
-        type=float,
-        default=0.012,
-        help="Learning rate for RL updates.",
-    )
-    parser.add_argument(
-        "--kl-coef",
-        type=float,
-        default=0.015,
-        help="Coefficient for KL penalty against the reference policy.",
-    )
+    parser.add_argument("--rl-episodes", type=int, default=170, help="RL policy-gradient episodes.")
+    parser.add_argument("--rl-batch-size", type=int, default=80, help="Trajectories per RL batch.")
+    parser.add_argument("--rl-lr", type=float, default=0.08, help="RL learning rate.")
+    parser.add_argument("--kl-coef", type=float, default=0.08, help="KL penalty against SFT policy.")
     parser.add_argument(
         "--baseline-momentum",
         type=float,
         default=0.9,
-        help="Momentum term for the moving baseline during RL.",
+        help="Moving reward baseline momentum.",
     )
 
     parser.add_argument(
         "--eval-samples",
         type=int,
-        default=64,
-        help="Number of samples per prompt for reward evaluation.",
+        default=20,
+        help="Sampled trajectories per task for evaluation.",
     )
     parser.add_argument(
-        "--env-reward-noise",
-        type=float,
-        default=0.05,
-        help="Observation noise applied to the hidden environment.",
+        "--example-count",
+        type=int,
+        default=3,
+        help="Number of before/after task examples to print.",
     )
+
+    parser.add_argument(
+        "--use-ollama",
+        action="store_true",
+        help="Optionally ask local Ollama to verbalize final answers for examples.",
+    )
+    parser.add_argument(
+        "--ollama-model",
+        type=str,
+        default="llama3.2",
+        help="Local Ollama model to use when --use-ollama is set.",
+    )
+    parser.add_argument(
+        "--ollama-timeout",
+        type=float,
+        default=4.0,
+        help="Short Ollama HTTP timeout in seconds.",
+    )
+
+    # Backward-compatible aliases or ignored knobs from the original continuous demo.
+    parser.add_argument("--num-prompts", dest="num_tasks", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--samples-per-prompt", dest="sft_demos_per_task", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--pairs-per-prompt", dest="pairs_per_task", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--demonstration-noise", dest="sft_noise_rate", type=float, help=argparse.SUPPRESS)
+    parser.add_argument("--prompt-dim", dest="_ignored_prompt_dim", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--response-dim", dest="_ignored_response_dim", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--preference-weak-noise", dest="_ignored_weak_noise", type=float, help=argparse.SUPPRESS)
+    parser.add_argument("--preference-strong-noise", dest="_ignored_strong_noise", type=float, help=argparse.SUPPRESS)
+    parser.add_argument("--env-reward-noise", dest="_ignored_env_noise", type=float, help=argparse.SUPPRESS)
 
     return parser
 
@@ -153,87 +149,46 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     rng = np.random.default_rng(args.seed)
+    tasks = generate_synthetic_tasks(args.num_tasks, rng)
 
-    prompt_set = data.generate_prompts(args.num_prompts, args.prompt_dim, rng)
-    environment = data.create_environment(
-        args.prompt_dim,
-        args.response_dim,
+    policy, sft_history = train_agent_sft_policy(
+        tasks,
         rng,
-        reward_noise=args.env_reward_noise,
-    )
-
-    sft_inputs, sft_targets = data.build_supervised_dataset(
-        environment,
-        prompt_set.features,
-        rng,
-        samples_per_prompt=args.samples_per_prompt,
-        demonstration_noise=args.demonstration_noise,
-    )
-
-    policy_model = Policy.initialize(
-        args.prompt_dim,
-        args.response_dim,
-        rng,
-    )
-
-    sft_history = policy_model.supervised_finetune(
-        sft_inputs,
-        sft_targets,
+        max_steps=args.max_steps,
+        demos_per_task=args.sft_demos_per_task,
+        noise_rate=float(np.clip(args.sft_noise_rate, 0.0, 1.0)),
         epochs=args.sft_epochs,
         lr=args.sft_lr,
-        batch_size=max(1, args.sft_batch_size),
-        rng=rng,
+        batch_size=args.sft_batch_size,
     )
 
-    baseline_true_reward = rl.estimate_true_reward(
-        policy_model,
-        prompt_set.features,
-        environment,
+    reward_model, reward_history, _preferences = train_agent_reward_model(
+        tasks,
         rng,
-        samples_per_prompt=max(1, args.eval_samples),
-    )
-
-    preference_data = data.build_preference_dataset(
-        environment,
-        prompt_set.features,
-        rng,
-        pairs_per_prompt=args.pairs_per_prompt,
-        strong_noise=args.preference_strong_noise,
-        weak_noise=args.preference_weak_noise,
-    )
-
-    reward_model = RewardModel.create_from_example(
-        prompt_set.features[0],
-        preference_data.response_a[0],
-    )
-    reward_history = reward_model.train(
-        preference_data.prompts,
-        preference_data.response_a,
-        preference_data.response_b,
-        preference_data.labels,
+        max_steps=args.max_steps,
+        pairs_per_task=args.pairs_per_task,
         epochs=args.reward_epochs,
         lr=args.reward_lr,
-        batch_size=max(1, args.reward_batch_size),
-        rng=rng,
+        batch_size=args.reward_batch_size,
     )
 
-    baseline_eval = rl.evaluate_policy(
-        policy_model,
-        prompt_set.features,
-        environment,
+    baseline_eval = evaluate_agent_policy(
+        policy,
         reward_model,
-        rng,
-        samples_per_prompt=max(1, args.eval_samples),
+        tasks,
+        np.random.default_rng(args.seed + 101),
+        max_steps=args.max_steps,
+        samples_per_task=max(1, args.eval_samples),
+        greedy=False,
     )
 
-    reference_policy = policy_model.clone()
-
-    rl_history = rl.run_policy_gradient(
-        policy_model,
+    reference_policy = policy.clone()
+    rl_history = run_agent_policy_gradient(
+        policy,
         reward_model,
-        prompt_set.features,
-        environment,
+        tasks,
         rng,
+        max_steps=args.max_steps,
         episodes=args.rl_episodes,
         batch_size=max(1, args.rl_batch_size),
         lr=args.rl_lr,
@@ -242,40 +197,98 @@ def main(argv: list[str] | None = None) -> None:
         baseline_momentum=args.baseline_momentum,
     )
 
-    final_eval = rl.evaluate_policy(
-        policy_model,
-        prompt_set.features,
-        environment,
+    final_eval = evaluate_agent_policy(
+        policy,
         reward_model,
-        rng,
-        samples_per_prompt=max(1, args.eval_samples),
+        tasks,
+        np.random.default_rng(args.seed + 101),
+        max_steps=args.max_steps,
+        samples_per_task=max(1, args.eval_samples),
+        greedy=False,
     )
 
-    print("=== Synthetic RLHF Pipeline ===")
-    print(f"Prompts: {args.num_prompts}, prompt_dim={args.prompt_dim}, response_dim={args.response_dim}")
+    print("=== AgentRLHF: Synthetic RLHF for Tool-Using AI Agents ===")
+    print("Model policy: local NumPy softmax policy")
+    print("LLM backend: synthetic/template fallback by default; optional local Ollama only")
+    print(f"Tasks: {args.num_tasks}, actions={len(ACTIONS)}, max_steps={args.max_steps}")
     print()
-    print("Supervised fine-tuning (last 5 epochs):")
+    print("SFT training (last 5 epochs):")
     print(_format_history_tail(sft_history, tail=min(5, len(sft_history))))
-    print(f"Average true reward after SFT: {baseline_true_reward:.4f}")
     print()
     print("Reward model training (last 5 epochs):")
     print(_format_history_tail(reward_history, tail=min(5, len(reward_history))))
-    print(f"Reward model final accuracy: {reward_history[-1]['accuracy']:.3f}")
     print()
-    print("Policy optimization via RLHF (last 5 episodes):")
+    print("Policy optimization via Agent RLHF (last 5 episodes):")
     print(_format_history_tail(rl_history, tail=min(5, len(rl_history))))
     print()
-    print(
-        f"Baseline predicted reward: {baseline_eval.mean_predicted_reward:.4f} | "
-        f"Baseline true reward: {baseline_eval.mean_true_reward:.4f}"
+    print(_format_eval("SFT baseline", baseline_eval))
+    print()
+    print(_format_eval("After Agent RLHF", final_eval))
+    print()
+    print(f"True reward improvement: {final_eval.true_reward - baseline_eval.true_reward:.4f}")
+
+    example_rows = []
+    for task in tasks:
+        for attempt in range(12):
+            example_seed = args.seed + task.task_id * 31 + attempt
+            sft_trace = rollout_policy(
+                reference_policy,
+                task,
+                np.random.default_rng(example_seed),
+                max_steps=args.max_steps,
+                greedy=False,
+            ).trajectory
+            rl_trace = rollout_policy(
+                policy,
+                task,
+                np.random.default_rng(example_seed),
+                max_steps=args.max_steps,
+                greedy=False,
+            ).trajectory
+            example_rows.append(
+                (rl_trace.true_reward - sft_trace.true_reward, task, sft_trace, rl_trace)
+            )
+    example_rows.sort(
+        key=lambda item: (item[0], item[3].true_reward, -len(item[3].actions)),
+        reverse=True,
     )
-    print(
-        f"Final predicted reward:    {final_eval.mean_predicted_reward:.4f} | "
-        f"Final true reward:    {final_eval.mean_true_reward:.4f}"
-    )
-    print(
-        f"True reward improvement: {final_eval.mean_true_reward - baseline_eval.mean_true_reward:.4f}"
-    )
+    distinct_examples = []
+    seen_task_types: set[str] = set()
+    for row in example_rows:
+        task_type = row[1].task_type
+        if task_type in seen_task_types:
+            continue
+        distinct_examples.append(row)
+        seen_task_types.add(task_type)
+
+    ollama_client = None
+    printed_warnings: set[str] = set()
+    if args.use_ollama:
+        ollama_client = OllamaClient(model=args.ollama_model, timeout=args.ollama_timeout)
+
+    print()
+    print("Example tasks:")
+    for idx, (improvement, task, sft_trace, rl_trace) in enumerate(
+        distinct_examples[: max(1, args.example_count)],
+        start=1,
+    ):
+        print(f"{idx}. prompt: {task.prompt}")
+        print(f"   task type: {task.task_type}")
+        print(f"   memory: {_format_memory(visible_memory_entries(task))}")
+        print(f"   SFT trajectory: {_format_actions(sft_trace.actions)} ({sft_trace.true_reward:.3f})")
+        print(f"   Agent RLHF trajectory: {_format_actions(rl_trace.actions)} ({rl_trace.true_reward:.3f})")
+        print(
+            f"   Agent RLHF tool cost/latency: "
+            f"{rl_trace.total_tool_cost:.3f}/{rl_trace.total_tool_latency:.3f}"
+        )
+        print(f"   reward improvement: {improvement:.3f}")
+        if ollama_client is not None:
+            answer = ollama_client.generate_final_answer(task, rl_trace)
+            if answer.warning and answer.warning not in printed_warnings:
+                print(f"   warning: {answer.warning}")
+                printed_warnings.add(answer.warning)
+            source = "Ollama" if answer.used_ollama else "synthetic/template"
+            print(f"   final answer ({source}): {answer.text}")
 
 
 if __name__ == "__main__":

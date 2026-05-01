@@ -110,3 +110,60 @@ class RewardModel:
             history.append({"epoch": float(epoch), "loss": float(epoch_loss), "accuracy": accuracy})
 
         return history
+
+
+@dataclass
+class AgentRewardModel:
+    """Trajectory-level pairwise reward model for tool-using agents."""
+
+    theta: np.ndarray  # shape: (trajectory_feature_dim,)
+
+    @classmethod
+    def initialize(cls, feature_dim: int) -> "AgentRewardModel":
+        return cls(theta=np.zeros(feature_dim, dtype=np.float64))
+
+    def score_features(self, features: np.ndarray) -> float:
+        value = float(self.theta.dot(features))
+        return float(np.clip(value, -6.0, 6.0))
+
+    def train(
+        self,
+        preferred_features: np.ndarray,
+        rejected_features: np.ndarray,
+        *,
+        epochs: int,
+        lr: float,
+        batch_size: int,
+        l2_penalty: float,
+        rng: np.random.Generator,
+    ) -> list[dict[str, float]]:
+        num_samples = preferred_features.shape[0]
+        indices = np.arange(num_samples)
+        deltas = preferred_features - rejected_features
+        history: list[dict[str, float]] = []
+
+        for epoch in range(1, epochs + 1):
+            rng.shuffle(indices)
+            epoch_loss = 0.0
+            for start in range(0, num_samples, batch_size):
+                batch_idx = indices[start : start + batch_size]
+                logits = deltas[batch_idx] @ self.theta
+                probs = sigmoid(logits)
+                loss = -np.mean(np.log(probs + 1e-9))
+                epoch_loss += loss * len(batch_idx)
+
+                grad = ((probs - 1.0)[:, None] * deltas[batch_idx]).mean(axis=0)
+                grad += l2_penalty * self.theta
+                self.theta -= lr * grad
+
+            logits_all = deltas @ self.theta
+            accuracy = float(np.mean(logits_all > 0.0))
+            history.append(
+                {
+                    "epoch": float(epoch),
+                    "loss": epoch_loss / max(1, num_samples),
+                    "accuracy": accuracy,
+                }
+            )
+
+        return history

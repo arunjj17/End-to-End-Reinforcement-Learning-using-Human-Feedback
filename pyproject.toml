@@ -1,13 +1,14 @@
 [project]
 name = "rlhf-pipeline"
 version = "0.1.0"
-description = "End-to-end RLHF pipeline with synthetic preference data"
+description = "Synthetic RLHF pipeline for local tool-using AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26"]
 
 [project.scripts]
 rlhf-pipeline = "rlhf_pipeline.cli:main"
+agent-rlhf = "rlhf_pipeline.cli:main"
 
 [build-system]
 requires = ["hatchling"]
